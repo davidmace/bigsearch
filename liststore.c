@@ -26,13 +26,13 @@ int compress(int position, int filenum) {
 }
 
 void maybe_expand_file(ListStore *ls, int filenum, int addition_bytes) {
-	/*if (ls->file_vals_stored[filenum] * 4 + addition_bytes >= ls->file_size[filenum] ) {
+	if (ls->file_vals_stored[filenum] * 4 + addition_bytes >= ls->file_size[filenum] ) {
 		lseek(ls->files[filenum], ls->file_size[filenum] + LIST_EXPANSION_BYTES, SEEK_SET);
 		char zero = 0;
 		write(ls->files[filenum], &zero, 1);
 		ls->file_size[filenum] += LIST_EXPANSION_BYTES;
-		printf("list: expanded\n");
-	}*/
+		//printf("list: expanded\n");
+	}
 }
 
 int ls_start_list(ListStore *ls, int value) {
@@ -110,7 +110,7 @@ ListStore* ls_init() {
 	for (i = 0; i < num_lists; i++) {
 		char str_i[5];
 		sprintf(str_i, "%d", i);
-		char fn[20] = "list";
+		char fn[30] = "storage/list";
 		strcat(fn, str_i);
 		//strcat(fn,".storage");
 		ls->files[i] = open(fn, O_RDWR | O_TRUNC | O_CREAT, S_IRWXU | S_IRWXG | S_IRWXO);

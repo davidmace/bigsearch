@@ -3,12 +3,11 @@
 #include <fcntl.h>
 #include <string.h>
 #include <unistd.h>
+#include <math.h>
 #include <sys/types.h>
 #include "fshashmap.h"
 
 #define PAGE_SIZE 128 // NOTE I store page size in char so this cant get bigger than 256
-#define NUM_BUCKETS 100000
-#define BUCKETS_PER_EXPANSION 100000
 
 // NOTE: I can only terminate with a 0 byte because no character is 0
 // but it will be problematic for storing arbitrary integers 
@@ -24,45 +23,45 @@
 
 // TODO might be slow if I'm editing off-alignment
 
-static void read_bucket(FSHashMap *hm, int bucket_num, char* bucket) {
-	lseek(hm->file, bucket_num * PAGE_SIZE, SEEK_SET);
-	read(hm->file, bucket, PAGE_SIZE);
+// Note: this is a duplicated function
+void clear_string2(char* s, int len) {
+	int i;
+	for (i = 0; i < len; i++) {
+		s[i] = '\0';
+	}
 }
 
-static void maybe_expand_file(FSHashMap *hm, int bucket_num) {
-	/*if (bucket_num * PAGE_SIZE >= hm->file_size ) {
-		lseek(hm->file, hm->file_size + PAGE_SIZE * BUCKETS_PER_EXPANSION, SEEK_SET);
-		char zero = 0;
-		write(hm->file, &zero, 1);
-		hm->file_size += PAGE_SIZE * BUCKETS_PER_EXPANSION;
-		printf("hashmap: expanded\n");
-	}*/
+int starts = 0;
+int reads = 0;
+
+static void read_bucket(int file, int bucket_num, char* bucket) {
+	lseek(file, bucket_num * PAGE_SIZE, SEEK_SET);
+	read(file, bucket, PAGE_SIZE);
 }
 
-static void write_bucket(FSHashMap *hm, int bucket_num, char* bucket) {
-	maybe_expand_file(hm, bucket_num);
-	lseek(hm->file, bucket_num * PAGE_SIZE, SEEK_SET);
-	write(hm->file, bucket, PAGE_SIZE);
+static void write_bucket(int file, int bucket_num, char* bucket) {
+	lseek(file, bucket_num * PAGE_SIZE, SEEK_SET);
+	write(file, bucket, PAGE_SIZE);
 }
 
 static void add_key_value_to_bucket(FSHashMap *hm, int bucket_num, char* key, int value) {
 	int write_bucket_num = hm->hash2write_bucket[bucket_num]; // in case we should write to overflow
 	size_t key_len = strlen(key);
 	char* bucket = (char*)malloc(PAGE_SIZE * sizeof(char));
-	read_bucket(hm, write_bucket_num, bucket);
-	char size = bucket[0];
+	read_bucket(hm->file, write_bucket_num, bucket);
+	unsigned char size = (unsigned char)bucket[0];
 	
 	// if we have just overflowed the bucket
 	if (size + key_len + 1 + 4 > PAGE_SIZE) {
 		// write in the old bucket the pointer to the new bucket
 		int * overflow_ptr_location = (int*)(bucket+1);
 		*overflow_ptr_location = hm->next_overflow_bucket;
-		write_bucket(hm, write_bucket_num, bucket);
+		write_bucket(hm->file, write_bucket_num, bucket);
 
 		// set the bucket to write to the new bucket
 		bucket[0] = 5;
 		int i;
-		for (i = 0; i < PAGE_SIZE; i++) {
+		for (i = 1; i < PAGE_SIZE; i++) {
 			bucket[i] = 0;
 		}
 
@@ -70,34 +69,46 @@ static void add_key_value_to_bucket(FSHashMap *hm, int bucket_num, char* key, in
 		hm->next_overflow_bucket += 1;
 		hm->hash2write_bucket[bucket_num] = write_bucket_num;
 		size = 5;
+		if (hm->next_overflow_bucket >= hm->num_buckets * 1.3) {
+			printf("%i %i\n", hm->next_overflow_bucket, hm->num_buckets);
+			expand_hm(hm);
+		}
+
+		// write the word that would have overflowed the bucket but now in the proper new hm bucket
+		hm_add(hm, key, value);
 	}
+	else {
+		// write the key's characters and the 0 terminating byte
+		int i;
+		for (i = 0; i < key_len; i++) {
+			bucket[size+i] = key[i];
+		}
+		bucket[size+key_len+0] = 0;
 
-	// write the key's characters and the 0 terminating byte
-	int i;
-	for (i = 0; i < key_len; i++) {
-		bucket[size+i] = key[i];
+		// write the value
+		int * intlocation = (int*)(bucket+size+key_len+1);
+		*intlocation = value;
+
+		// append the size
+		size += key_len+4+1;
+		bucket[0] = (char)size;
+
+		write_bucket(hm->file, write_bucket_num, bucket);
+		free(bucket);
 	}
-	bucket[size+key_len+0] = 0;
-	
-	// write the value
-	int * intlocation = (int*)(bucket+size+key_len+1);
-	*intlocation = value;
-
-	// append the size
-	bucket[0] += key_len+4+1;
-
-	write_bucket(hm, write_bucket_num, bucket);
-	free(bucket);
 }
+
 
 static PosAndVal* get_value_from_key(FSHashMap *hm, int bucket_num, char* key) {
 	char matching = 1;
 	char* bucket = (char*)malloc(PAGE_SIZE * sizeof(char));
+	//starts += 1;
 
 	while (1) {
 		//printf("yo %i\n", bucket_num);
-		read_bucket(hm, bucket_num, bucket);
-		char size = bucket[0];
+		//reads += 1;
+		read_bucket(hm->file, bucket_num, bucket);
+		unsigned char size = (unsigned char)bucket[0];
 
 		int key_i = 0;
 		int i;
@@ -143,44 +154,159 @@ static PosAndVal* get_value_from_key(FSHashMap *hm, int bucket_num, char* key) {
 	return NULL;
 }
 
-static int key2hash(char* key) {
+static int key2hash_old(char* key, int num_buckets) {
+	//printf("%i\n",strlen(key));
 	int sm = 0;
 	int i;
 	for (i = 0; i < strlen(key); i++) {
 		sm += key[i];
-		sm = (27 * sm) % NUM_BUCKETS;
+		sm = (27 * sm) % num_buckets;
+		//printf("%i %i %i\n",sm,key[i],(27 * sm) % num_buckets);
 	}
-	int hash = sm % NUM_BUCKETS;
+	//printf("\n",sm);
+	int hash = sm % num_buckets;
 	return hash;
 }
 
+static int key2hash(char *str, int num_buckets)
+{
+    unsigned long hash = 5381;
+    int c;
 
-FSHashMap* hm_init() {
-	int file = open("hm.storage", O_RDWR | O_TRUNC);
-	FSHashMap *hm = (FSHashMap*)malloc(sizeof(FSHashMap));
+    while ( (c = *str++) )
+        hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
+
+    //printf("%i\n",hash % num_buckets);
+    return (int)(hash % num_buckets);
+}
+
+void clear_hm(FSHashMap *hm, int hm_num, int num_buckets) {
+	hm->num_buckets = num_buckets;
+	hm->file_size = num_buckets * PAGE_SIZE;
+	hm->hm_num = hm_num;
+
+	char str[30];
+	sprintf(str, "storage/hm%i", hm_num);
+	int file = open(str, O_RDWR | O_TRUNC | O_CREAT, S_IRWXU | S_IRWXG | S_IRWXO);
 	hm->file = file;
-	hm->file_size = NUM_BUCKETS * PAGE_SIZE;
-	hm->hash2write_bucket = (int*)malloc(NUM_BUCKETS * sizeof(int));
+
+	// all hashes initially write to their main bucket rather than overflow
+	hm->hash2write_bucket = (int*)malloc(num_buckets * sizeof(int));
 	int i;
-	for(i = 0; i < NUM_BUCKETS; i++) {
+	for(i = 0; i < num_buckets; i++) {
 		hm->hash2write_bucket[i] = i;
 	}
-  hm->next_overflow_bucket = NUM_BUCKETS;
+	hm->next_overflow_bucket = num_buckets;
 
-  char bucket[PAGE_SIZE];
+	// init all buckets
+	char bucket[PAGE_SIZE];
 	bucket[0] = 5;
 	for (i = 1; i < PAGE_SIZE; i++) {
 		bucket[i] = 0;
 	}
-	for (i = 0; i < NUM_BUCKETS; i++) {
-		write_bucket(hm, i, bucket);
+	for (i = num_buckets * 1.3 - 1; i >= 0; i--) {
+		write_bucket(hm->file, i, bucket);
 	}
 
+}
+
+void expand_hm(FSHashMap *hm) {
+	printf("EXPAND HM\n");
+	//int file_new = open("storage/hm"+str(hm->hm_num+1), O_RDWR | O_TRUNC | O_CREAT, S_IRWXU | S_IRWXG | S_IRWXO);
+	
+	// expand the file to full size
+	//lseek(file_new, hm->num_buckets * PAGE_SIZE, SEEK_SET);
+	//char zero = 0;
+	//write(file_new, &zero, 1);
+	int old_file = hm->file;
+	int old_num_buckets = hm->num_buckets;
+	clear_hm(hm, hm->hm_num + 1, hm->num_buckets * 3);
+
+	char* bucket = (char*)malloc(PAGE_SIZE * sizeof(char));
+	int bucket_num;
+	for (bucket_num = 0; bucket_num < floor(old_num_buckets * 1.3); bucket_num++) {
+		read_bucket(old_file, bucket_num, bucket);
+
+		// read key,val in buckets
+		char* key = (char*)malloc(PAGE_SIZE * sizeof(char));
+		clear_string2(key, PAGE_SIZE);
+		int key_i = 0;
+		int bucket_i;
+		unsigned char this_bucket_size = (unsigned char)bucket[0];
+		//printf("START BUCKET %i %i\n", bucket_num, this_bucket_size);
+		for (bucket_i = 5; bucket_i < this_bucket_size; bucket_i++) {
+			if (bucket[bucket_i] == '\0') {
+				int val = *((int*)(bucket + bucket_i + 1));
+				hm_add(hm, key, val);
+				//if (strncmp(key,"third",5) == 0)
+				//if (strncmp(key,"twentysixth",11) == 0)
+					//return;
+				//printf("%s %i\n", key, val);
+				key_i = 0;
+				bucket_i += 4;
+				clear_string2(key, PAGE_SIZE);
+			}
+			else {
+				key[key_i] = bucket[bucket_i];
+				key_i += 1;
+			}
+		}
+	}
+	//printf("DONE EXPAND\n");
+
+}
+
+void print_hm(FSHashMap *hm) {
+	printf("\nPRINT_HM\n");
+	//int file_new = open("storage/hm"+str(hm->hm_num+1), O_RDWR | O_TRUNC | O_CREAT, S_IRWXU | S_IRWXG | S_IRWXO);
+	
+	// expand the file to full size
+	//lseek(file_new, hm->num_buckets * PAGE_SIZE, SEEK_SET);
+	//char zero = 0;
+	//write(file_new, &zero, 1);
+	int old_file = hm->file;
+	int old_num_buckets = hm->num_buckets;
+	//clear_hm(hm, hm->hm_num + 1, hm->num_buckets * 3);
+
+	char* bucket = (char*)malloc(PAGE_SIZE * sizeof(char));
+	int bucket_num;
+	for (bucket_num = 0; bucket_num < floor(old_num_buckets * 1.3); bucket_num++) {
+		read_bucket(old_file, bucket_num, bucket);
+
+		// read key,val in buckets
+		char* key = (char*)malloc(PAGE_SIZE * sizeof(char));
+		clear_string2(key, PAGE_SIZE);
+		int key_i = 0;
+		int bucket_i;
+		unsigned char this_bucket_size = (unsigned char)bucket[0];
+		//printf("START BUCKET %i %i\n", bucket_num, this_bucket_size);
+		for (bucket_i = 5; bucket_i < this_bucket_size; bucket_i++) {
+			if (bucket[bucket_i] == '\0') {
+				int val = *((int*)(bucket + bucket_i + 1));
+				//hm_add(hm, key, val);
+				printf("%s %i\n", key, val);
+				key_i = 0;
+				bucket_i += 4;
+				clear_string2(key, PAGE_SIZE);
+			}
+			else {
+				key[key_i] = bucket[bucket_i];
+				key_i += 1;
+			}
+		}
+	}
+
+}
+
+FSHashMap* hm_init(int num_buckets) {
+	FSHashMap *hm = (FSHashMap*)malloc(sizeof(FSHashMap));
+	clear_hm(hm, 0, num_buckets);
 	return hm;
 }
 
 void hm_add(FSHashMap *hm, char* key, int value) {
-	int bucket_num = key2hash(key);
+	//printf("hm_add, %s %i\n", key, key2hash(key, hm->num_buckets));
+	int bucket_num = key2hash(key, hm->num_buckets);
 	add_key_value_to_bucket(hm, bucket_num, key, value);
 }
 
@@ -190,16 +316,22 @@ void hm_set(FSHashMap *hm, int pos, int value) {
 }
 
 PosAndVal* hm_get(FSHashMap *hm, char* key) {
-	int bucket_num = key2hash(key);
+	int bucket_num = key2hash(key, hm->num_buckets);
 	PosAndVal *answer = get_value_from_key(hm, bucket_num, key);
 	return answer;
+}
+
+void print_stats() {
+	printf("%f\n",1.0*reads/starts);
+	starts = 0;
+	reads = 0;
 }
 
 
 
 static void test() {
 	
-	FSHashMap *hm = hm_init();
+	FSHashMap *hm = hm_init(10);
 	//hm_add(hm,"sunnyk",255);
 
 	hm_add(hm,"cat",255);

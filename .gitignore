@@ -1,5 +1,9 @@
 storage/
 documents/
+test.txt
 fshashmap
 indexer
 test
+.DS_Store
+run-results.xlsx
+~$run-results.xlsx

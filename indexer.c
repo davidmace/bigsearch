@@ -32,9 +32,9 @@ int* get_list(Indexer *indexer, char* key) {
 	return l;
 }
 
-Indexer* indexer_init() {
+Indexer* indexer_init(int hm_num_buckets) {
 	Indexer *indexer = (Indexer*)malloc(sizeof(Indexer));
-	FSHashMap *hm = hm_init();
+	FSHashMap *hm = hm_init(hm_num_buckets);
 	indexer->hm = hm;
 	ListStore *ls = ls_init();
 	indexer->ls = ls;
